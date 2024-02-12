@@ -1,0 +1,9 @@
+
+01 - autos
+02 - sport - baseball
+03 - med
+04 - politics - guns
+05 - comp.graphics
+
+
+unique words = 7,939
