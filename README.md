@@ -1,6 +1,17 @@
 # Graph Machine Learning course, 2023
 ## Xavier Bresson
 
+<img src="pic/gml.jpg" align="right" width="300"/>
+
+
+
+<br><br> 
+
+
+### Course slides 
+https://storage.googleapis.com/xavierbresson/index.html
+
+
 
 <br><br> 
 
