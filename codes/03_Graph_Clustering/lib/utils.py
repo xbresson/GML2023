@@ -84,12 +84,12 @@ def graph_laplacian(W, normalized=True):
 
     # Laplacian matrix
     if not normalized:
-        D = scipy.sparse.diags(d.A.squeeze(), 0)
+        D = scipy.sparse.diags(d.squeeze(), 0)
         L = D - W
     else:
         d += np.spacing(np.array(0, W.dtype)) # d += epsilon
         d = 1.0 / np.sqrt(d)
-        D = scipy.sparse.diags(d.A.squeeze(), 0)
+        D = scipy.sparse.diags(d.squeeze(), 0)
         I = scipy.sparse.identity(d.size, dtype=W.dtype)
         L = I - D * W * D
     return L
