@@ -1,7 +1,7 @@
 # Xavier Bresson, 2023
 # conda env create -f environment.yml
 # conda activate gnn_course
-# note: took 5min to solve the env
+# note: It took 10 min to install the environment
 
 name: gnn_course
 
@@ -17,23 +17,25 @@ dependencies:
 
   # basic
   - python=3.8
-  - numpy
-  - mkl
-  - jupyter
-  - ipython
-  - matplotlib
-  - scipy
-  - networkx==2.3
-  - scikit-learn
-  - pandas
-  - seaborn
+  - numpy=1.23
+  - mkl=2023.2
+  - jupyter=1.0
+  - ipython=8.12
+  - matplotlib=3.7
+  - scipy=1.10
+  - networkx=3.1
+  - scikit-learn=1.3
+  - pandas=2.0
+  - seaborn=0.13
 
   # non-DL
-  - pymetis
-  - python-louvain
+  - pymetis=2023.1
+  - python-louvain=0.16
 
   # DL
-  - pytorch # DL
-  - torchvision # CV 
-  - dgl # DGL
-  - pyg # PyG
+  - pytorch=2.1.2 # DL
+  - torchvision=0.16 # CV 
+
+  # GNN
+  - dgl=2.0.0 # DGL
+  - pyg=2.5.1 # PyG
