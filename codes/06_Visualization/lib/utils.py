@@ -12,6 +12,281 @@ import time
 import torch
 import torch.nn as nn
 
+import psutil
+
+
+
+
+######################################
+# Usages: 
+# (1) W = construct_knn_graph(X,k,'euclidean')
+# (2) W = construct_knn_graph(X,k,'euclidean_zelnik_perona')
+# (3) W = construct_knn_graph(X,k,'cosine')
+# (4) W = construct_knn_graph(X,k,'cosine_binary')
+#
+# X = torch.Tensor([[1,2,9],[4,5,2],[7,5,9],[0,11,12]])
+# print(X, X.size())
+# kNN = 3
+# batch_size = 2
+# W = construct_knn_graph(X, kNN, 'euclidean', batch_size)
+# print(W)
+#
+# Notations:
+#   n = nb_data
+#   d = data_dimensionality
+#
+# Input variables:
+#   X = Data matrix. Size = n x d.
+#   kNN = Number of nearest neaighbors. 
+#   dist = Type of distances: 'euclidean' or 'cosine'
+#
+# Output variables:
+#   W = Adjacency matrix. Size = n x n.
+######################################
+
+def construct_knn_graph(X, kNN, dist, batch_size=2000, device='cpu'):
+
+    batch_size = int( batch_size * 16 / (psutil.virtual_memory().total/2**30) ) # ram mem = psutil.virtual_memory().total/2**30
+    print('batch_size',batch_size)
+
+    if torch.is_tensor(X) == False:
+        print('Convert from numpy to pytorch')
+        X = torch.Tensor(X) # convert from numpy to pytorch
+        
+    X = X.to(device)
+
+    # Compute L2/Euclidean distance between pairs of points with matrix-matrix mulitplications
+    # Dist_sqr = |xi-xj|^2 = |xi|^2 + |xj|^2 - 2 xi.xj
+    # Dist_sqr = [ D11 D12 Dij ... D1m ]
+    #            [ D21 D22     ... D2m ]
+    #            [             ...     ]
+    #            [ Dn1 Dn2     ... Dnm ]
+    #
+    #          = [ |x1|^2 |x1|^2 ... |x1|^2 ]
+    #            [ |x2|^2 |x2|^2 ... |x2|^2 ]
+    #            [               ...        ]
+    #            [ |xn|^2 |xn|^2 ... |xn|^2 ]
+    #          +
+    #            [ |x1|^2 |x2|^2 ... |xn|^2 ]
+    #            [ |x1|^2 |x2|^2 ... |xn|^2 ]
+    #            [               ...        ]
+    #            [ |x1|^2 |x2|^2 ... |xn|^2 ]
+    #      - 2 *
+    #            [ x1.x1 x1.x2 ... x1.xn ]
+    #            [ x2.x1 x2.x2 ... x2.xn ]
+    #            [             ...       ]
+    #            [ xn.x1 xn.x2 ... xn.xn ]
+  
+    ######################################
+    # Construct a k-NN graph with L2/Euclidean distance
+    ######################################
+    if dist == 'euclidean':
+        
+        print('k-NN graph construction with euclidean distance')
+        start = time.time()
+
+        # Compute L2 distance between all pairs of points
+        X = X - X.mean(dim=0).unsqueeze(dim=0) # centered data, size=[n, d] 
+        X2 = (X**2).sum(dim=1) # size=[n] 
+        n = X.size(0)
+        num_batch = n // batch_size
+        if (n//batch_size)*batch_size < n: num_batch += 1
+        print('n, batch_size, num_batch, kNN, device:', n, batch_size, num_batch, kNN, device)
+        values_knn = []
+        idx_knn = []
+        idx_current = 0
+        for idx in range(num_batch):
+            X_sliced = X[idx*batch_size:(idx+1)*batch_size, :] # size=[batch_size, d] 
+            batch_size_current = X_sliced.size(0) 
+            term1 = X2.repeat(batch_size_current,1) # size=[batch_size, n]
+            term2 = X2[idx_current:idx_current+batch_size_current].unsqueeze(1).repeat(1,n) # size=[batch_size, n]
+            idx_current += batch_size_current
+            term3 = X_sliced @ X.transpose(1,0) # size=[batch_size, n] 
+            D = term1 + term2 - 2 * term3 # size=[batch_size, n]
+            sorted, indices = torch.sort(D, dim=1) # from smallest to largest values, size=[batch_size, n]
+            values_knn.append(sorted[:,:kNN]) # size=[batch_size, kNN]
+            idx_knn.append(indices[:,:kNN]) # size=[batch_size, kNN]
+            del X_sliced, term1, term2, term3, D, sorted, indices
+            print('batch idx:',idx+1,'/',num_batch,' time(sec):',(time.time()-start)/1) 
+        values_knn = torch.cat(values_knn)
+        idx_knn = torch.cat(idx_knn)
+
+        # Compute Weight matrix
+        D = values_knn.sqrt()
+        sigma2 = (D[:,-1]).mean()**2 # graph-level scale
+        D = (D**2).view(n*kNN)
+        W = torch.exp( -D / sigma2 )
+        
+        # Make W sparse
+        row = torch.arange(n).repeat_interleave(kNN).to('cpu')
+        col = idx_knn.view(n*kNN).to('cpu')
+        data = W.to('cpu')
+        W = scipy.sparse.csr_matrix((data, (row, col)), shape=(n, n))
+        
+        # Make W is symmetric
+        bigger = W.T > W
+        W = W - W.multiply(bigger) + W.T.multiply(bigger)
+        W.setdiag(0) # remove self-connections
+
+        print('Computational time(sec) for k-NN graph:',(time.time()-start)/1) 
+
+    
+    ######################################
+    # Construct a k-NN graph with Zelnik-Perona technique
+    # "Self-Tuning Spectral Clustering", 2005
+    ######################################
+    if dist == 'euclidean_zelnik_perona':
+
+        print('k-NN graph construction with Zelnik-Perona technique')
+        start = time.time()
+
+        # Compute L2 distance between all pairs of points
+        X = X - X.mean(dim=0).unsqueeze(dim=0) # centered data, size=[n, d] 
+        X2 = (X**2).sum(dim=1) # size=[n] 
+        n = X.size(0)
+        num_batch = n // batch_size
+        if (n//batch_size)*batch_size < n: num_batch += 1
+        print('n, batch_size, num_batch, kNN, device:', n, batch_size, num_batch, kNN, device)
+        values_knn = []
+        idx_knn = []
+        idx_current = 0
+        for idx in range(num_batch):
+            X_sliced = X[idx*batch_size:(idx+1)*batch_size, :] # size=[batch_size, d] 
+            batch_size_current = X_sliced.size(0) 
+            term1 = X2.repeat(batch_size_current,1) # size=[batch_size, n]
+            term2 = X2[idx_current:idx_current+batch_size_current].unsqueeze(1).repeat(1,n) # size=[batch_size, n]
+            idx_current += batch_size_current
+            term3 = X_sliced @ X.transpose(1,0) # size=[batch_size, n] 
+            D = term1 + term2 - 2 * term3 # size=[batch_size, n]
+            sorted, indices = torch.sort(D, dim=1) # from smallest to largest values, size=[batch_size, n]
+            values_knn.append(sorted[:,:kNN]) # size=[batch_size, kNN]
+            idx_knn.append(indices[:,:kNN]) # size=[batch_size, kNN]
+            del X_sliced, term1, term2, term3, D, sorted, indices
+            print('batch idx:',idx+1,'/',num_batch,' time(sec):',(time.time()-start)/1) 
+        values_knn = torch.cat(values_knn)
+        idx_knn = torch.cat(idx_knn)
+
+        # Compute Weight matrix
+        D = values_knn.sqrt()
+        sigma = D[:,-1] 
+        sigma_i = sigma[torch.arange(n).repeat_interleave(kNN)] # sigma_i in Zelnik-Perona technique
+        sigma_j = sigma[idx_knn.view(n*kNN)] # sigma_j in Zelnik-Perona technique
+        D = (D**2).view(n*kNN) / ( sigma_i * sigma_j )
+        W = torch.exp(-D)
+        
+        # Make W sparse
+        row = torch.arange(n).repeat_interleave(kNN).to('cpu')
+        col = idx_knn.view(n*kNN).to('cpu')
+        data = W.to('cpu')
+        W = scipy.sparse.csr_matrix((data, (row, col)), shape=(n, n))
+        
+        # Make W is symmetric
+        bigger = W.T > W
+        W = W - W.multiply(bigger) + W.T.multiply(bigger)
+        W.setdiag(0) # remove self-connections
+
+        print('Computational time(sec) for k-NN graph:',(time.time()-start)/1) 
+
+    
+    ######################################
+    # Construct a k-NN graph with Cosine distance
+    ######################################
+    if dist == 'cosine':
+        
+        print('k-NN graph construction with cosine distance')
+        start = time.time()
+
+        # Compute dot products between all pairs of points
+        X = X - X.mean(dim=0).unsqueeze(dim=0) # centered data, size=[n, d] 
+        X = X / (X**2).sum(dim=1).sqrt().unsqueeze(1) # normalized data / project data on unit sphere, size=[n, d] 
+        n = X.size(0)
+        num_batch = n // batch_size
+        if (n//batch_size)*batch_size < n: num_batch += 1
+        print('n, batch_size, num_batch, kNN, device:', n, batch_size, num_batch, kNN, device)
+        values_knn = []
+        idx_knn = []
+        idx_current = 0
+        for idx in range(num_batch):
+            X_sliced = X[idx*batch_size:(idx+1)*batch_size, :] # size=[batch_size, d] 
+            batch_size_current = X_sliced.size(0) 
+            idx_current += batch_size_current
+            D = X_sliced @ X.transpose(1,0) # size=[batch_size, n] 
+            sorted, indices = torch.sort(D, dim=1, descending=True) # from *largest* to smallest values, size=[batch_size, n]
+            sorted = torch.arccos(sorted).abs() # positive angles
+            values_knn.append(sorted[:,:kNN]) # size=[batch_size, kNN]
+            idx_knn.append(indices[:,:kNN]) # size=[batch_size, kNN]
+            del X_sliced, D, sorted, indices
+            print('batch idx:',idx+1,'/',num_batch,' time(sec):',(time.time()-start)/1) 
+        values_knn = torch.cat(values_knn)
+        idx_knn = torch.cat(idx_knn)
+
+        # Compute Weight matrix
+        D = values_knn.sqrt()
+        sigma2 = (D[:,-1]).mean()**2 # graph-level scale
+        D = (D**2).view(n*kNN)
+        W = torch.exp( -D / sigma2 )
+
+        # Make W sparse
+        row = torch.arange(n).repeat_interleave(kNN).to('cpu')
+        col = idx_knn.view(n*kNN).to('cpu')
+        data = W.to('cpu')
+        W = scipy.sparse.csr_matrix((data, (row, col)), shape=(n, n))
+        
+        # Make W is symmetric
+        bigger = W.T > W
+        W = W - W.multiply(bigger) + W.T.multiply(bigger)
+        W.setdiag(0) # remove self-connections
+
+        print('Computational time(sec) for k-NN graph:',(time.time()-start)/1) 
+
+    
+    ######################################
+    # Construct a k-NN graph with Cosine distance
+    ######################################
+    if dist == 'cosine_binary':
+        
+        print('k-NN graph construction with cosine distance with binary weights')
+        start = time.time()
+
+        # Compute dot products between all pairs of points
+        X = X - X.mean(dim=0).unsqueeze(dim=0) # centered data, size=[n, d] 
+        X = X / (X**2).sum(dim=1).sqrt().unsqueeze(1) # normalized data / project data on unit sphere, size=[n, d] 
+        n = X.size(0)
+        num_batch = n // batch_size
+        if (n//batch_size)*batch_size < n: num_batch += 1
+        print('n, batch_size, num_batch, kNN, device:', n, batch_size, num_batch, kNN, device)
+        values_knn = []
+        idx_knn = []
+        idx_current = 0
+        for idx in range(num_batch):
+            X_sliced = X[idx*batch_size:(idx+1)*batch_size, :] # size=[batch_size, d] 
+            batch_size_current = X_sliced.size(0) 
+            idx_current += batch_size_current
+            D = X_sliced @ X.transpose(1,0) # size=[batch_size, n] 
+            sorted, indices = torch.sort(D, dim=1, descending=True) # from *largest* to smallest values, size=[batch_size, n]
+            sorted = torch.arccos(sorted).abs() # positive angles
+            values_knn.append(sorted[:,:kNN]) # size=[batch_size, kNN]
+            idx_knn.append(indices[:,:kNN]) # size=[batch_size, kNN]
+            del X_sliced, D, sorted, indices
+            print('batch idx:',idx+1,'/',num_batch,' time(sec):',(time.time()-start)/1) 
+        values_knn = torch.cat(values_knn)
+        idx_knn = torch.cat(idx_knn)
+
+        # Compute Weight matrix, W sparse
+        row = torch.arange(n).repeat_interleave(kNN).to('cpu')
+        col = idx_knn.view(n*kNN).to('cpu')
+        data = torch.ones(n*kNN).to('cpu')
+        W = scipy.sparse.csr_matrix((data, (row, col)), shape=(n, n))
+        
+        # Make W is symmetric
+        bigger = W.T > W
+        W = W - W.multiply(bigger) + W.T.multiply(bigger)
+        W.setdiag(0) # remove self-connections
+
+        print('Computational time(sec) for k-NN graph:',(time.time()-start)/1) 
+    
+    return W
+
 
 
 
@@ -281,276 +556,6 @@ def compute_ncut(W, Cgt, R):
 
 
 
-
-
-
-
-######################################
-# Usages: 
-# (1) W = construct_knn_graph(X,k,'euclidean')
-# (2) W = construct_knn_graph(X,k,'euclidean_zelnik_perona')
-# (3) W = construct_knn_graph(X,k,'cosine')
-# (4) W = construct_knn_graph(X,k,'cosine_binary')
-#
-# X = torch.Tensor([[1,2,9],[4,5,2],[7,5,9],[0,11,12]])
-# print(X, X.size())
-# kNN = 3
-# batch_size = 2
-# W = construct_knn_graph(X, kNN, 'euclidean', batch_size)
-# print(W)
-#
-# Notations:
-#   n = nb_data
-#   d = data_dimensionality
-#
-# Input variables:
-#   X = Data matrix. Size = n x d.
-#   kNN = Number of nearest neaighbors. 
-#   dist = Type of distances: 'euclidean' or 'cosine'
-#
-# Output variables:
-#   W = Adjacency matrix. Size = n x n.
-######################################
-
-def construct_knn_graph(X, kNN, dist, batch_size=2000, device='cpu'):
-
-    if torch.is_tensor(X) == False:
-        print('Convert from numpy to pytorch')
-        X = torch.Tensor(X) # convert from numpy to pytorch
-        
-    X = X.to(device)
-
-    # Compute L2/Euclidean distance between pairs of points with matrix-matrix mulitplications
-    # Dist_sqr = |xi-xj|^2 = |xi|^2 + |xj|^2 - 2 xi.xj
-    # Dist_sqr = [ D11 D12 Dij ... D1m ]
-    #            [ D21 D22     ... D2m ]
-    #            [             ...     ]
-    #            [ Dn1 Dn2     ... Dnm ]
-    #
-    #          = [ |x1|^2 |x1|^2 ... |x1|^2 ]
-    #            [ |x2|^2 |x2|^2 ... |x2|^2 ]
-    #            [               ...        ]
-    #            [ |xn|^2 |xn|^2 ... |xn|^2 ]
-    #          +
-    #            [ |x1|^2 |x2|^2 ... |xn|^2 ]
-    #            [ |x1|^2 |x2|^2 ... |xn|^2 ]
-    #            [               ...        ]
-    #            [ |x1|^2 |x2|^2 ... |xn|^2 ]
-    #      - 2 *
-    #            [ x1.x1 x1.x2 ... x1.xn ]
-    #            [ x2.x1 x2.x2 ... x2.xn ]
-    #            [             ...       ]
-    #            [ xn.x1 xn.x2 ... xn.xn ]
-  
-    ######################################
-    # Construct a k-NN graph with L2/Euclidean distance
-    ######################################
-    if dist == 'euclidean':
-        
-        print('k-NN graph construction with euclidean distance')
-        start = time.time()
-
-        # Compute L2 distance between all pairs of points
-        X = X - X.mean(dim=0).unsqueeze(dim=0) # centered data, size=[n, d] 
-        X2 = (X**2).sum(dim=1) # size=[n] 
-        n = X.size(0)
-        num_batch = n // batch_size
-        if (n//batch_size)*batch_size < n: num_batch += 1
-        print('n, batch_size, num_batch, kNN, device:', n, batch_size, num_batch, kNN, device)
-        values_knn = []
-        idx_knn = []
-        idx_current = 0
-        for idx in range(num_batch):
-            X_sliced = X[idx*batch_size:(idx+1)*batch_size, :] # size=[batch_size, d] 
-            batch_size_current = X_sliced.size(0) 
-            term1 = X2.repeat(batch_size_current,1) # size=[batch_size, n]
-            term2 = X2[idx_current:idx_current+batch_size_current].unsqueeze(1).repeat(1,n) # size=[batch_size, n]
-            idx_current += batch_size_current
-            term3 = X_sliced @ X.transpose(1,0) # size=[batch_size, n] 
-            D = term1 + term2 - 2 * term3 # size=[batch_size, n]
-            sorted, indices = torch.sort(D, dim=1) # from smallest to largest values, size=[batch_size, n]
-            values_knn.append(sorted[:,:kNN]) # size=[batch_size, kNN]
-            idx_knn.append(indices[:,:kNN]) # size=[batch_size, kNN]
-            del X_sliced, term1, term2, term3, D, sorted, indices
-            print('batch idx:',idx+1,'/',num_batch,' time(sec):',(time.time()-start)/1) 
-        values_knn = torch.cat(values_knn)
-        idx_knn = torch.cat(idx_knn)
-
-        # Compute Weight matrix
-        D = values_knn.sqrt()
-        sigma2 = (D[:,-1]).mean()**2 # graph-level scale
-        D = (D**2).view(n*kNN)
-        W = torch.exp( -D / sigma2 )
-        
-        # Make W sparse
-        row = torch.arange(n).repeat_interleave(kNN).to('cpu')
-        col = idx_knn.view(n*kNN).to('cpu')
-        data = W.to('cpu')
-        W = scipy.sparse.csr_matrix((data, (row, col)), shape=(n, n))
-        
-        # Make W is symmetric
-        bigger = W.T > W
-        W = W - W.multiply(bigger) + W.T.multiply(bigger)
-        W.setdiag(0) # remove self-connections
-
-        print('Computational time(sec) for k-NN graph:',(time.time()-start)/1) 
-
-    
-    ######################################
-    # Construct a k-NN graph with Zelnik-Perona technique
-    # "Self-Tuning Spectral Clustering", 2005
-    ######################################
-    if dist == 'euclidean_zelnik_perona':
-
-        print('k-NN graph construction with Zelnik-Perona technique')
-        start = time.time()
-
-        # Compute L2 distance between all pairs of points
-        X = X - X.mean(dim=0).unsqueeze(dim=0) # centered data, size=[n, d] 
-        X2 = (X**2).sum(dim=1) # size=[n] 
-        n = X.size(0)
-        num_batch = n // batch_size
-        if (n//batch_size)*batch_size < n: num_batch += 1
-        print('n, batch_size, num_batch, kNN, device:', n, batch_size, num_batch, kNN, device)
-        values_knn = []
-        idx_knn = []
-        idx_current = 0
-        for idx in range(num_batch):
-            X_sliced = X[idx*batch_size:(idx+1)*batch_size, :] # size=[batch_size, d] 
-            batch_size_current = X_sliced.size(0) 
-            term1 = X2.repeat(batch_size_current,1) # size=[batch_size, n]
-            term2 = X2[idx_current:idx_current+batch_size_current].unsqueeze(1).repeat(1,n) # size=[batch_size, n]
-            idx_current += batch_size_current
-            term3 = X_sliced @ X.transpose(1,0) # size=[batch_size, n] 
-            D = term1 + term2 - 2 * term3 # size=[batch_size, n]
-            sorted, indices = torch.sort(D, dim=1) # from smallest to largest values, size=[batch_size, n]
-            values_knn.append(sorted[:,:kNN]) # size=[batch_size, kNN]
-            idx_knn.append(indices[:,:kNN]) # size=[batch_size, kNN]
-            del X_sliced, term1, term2, term3, D, sorted, indices
-            print('batch idx:',idx+1,'/',num_batch,' time(sec):',(time.time()-start)/1) 
-        values_knn = torch.cat(values_knn)
-        idx_knn = torch.cat(idx_knn)
-
-        # Compute Weight matrix
-        D = values_knn.sqrt()
-        sigma = D[:,-1] 
-        sigma_i = sigma[torch.arange(n).repeat_interleave(kNN)] # sigma_i in Zelnik-Perona technique
-        sigma_j = sigma[idx_knn.view(n*kNN)] # sigma_j in Zelnik-Perona technique
-        D = (D**2).view(n*kNN) / ( sigma_i * sigma_j )
-        W = torch.exp(-D)
-        
-        # Make W sparse
-        row = torch.arange(n).repeat_interleave(kNN).to('cpu')
-        col = idx_knn.view(n*kNN).to('cpu')
-        data = W.to('cpu')
-        W = scipy.sparse.csr_matrix((data, (row, col)), shape=(n, n))
-        
-        # Make W is symmetric
-        bigger = W.T > W
-        W = W - W.multiply(bigger) + W.T.multiply(bigger)
-        W.setdiag(0) # remove self-connections
-
-        print('Computational time(sec) for k-NN graph:',(time.time()-start)/1) 
-
-    
-    ######################################
-    # Construct a k-NN graph with Cosine distance
-    ######################################
-    if dist == 'cosine':
-        
-        print('k-NN graph construction with cosine distance')
-        start = time.time()
-
-        # Compute dot products between all pairs of points
-        X = X - X.mean(dim=0).unsqueeze(dim=0) # centered data, size=[n, d] 
-        X = X / (X**2).sum(dim=1).sqrt().unsqueeze(1) # normalized data / project data on unit sphere, size=[n, d] 
-        n = X.size(0)
-        num_batch = n // batch_size
-        if (n//batch_size)*batch_size < n: num_batch += 1
-        print('n, batch_size, num_batch, kNN, device:', n, batch_size, num_batch, kNN, device)
-        values_knn = []
-        idx_knn = []
-        idx_current = 0
-        for idx in range(num_batch):
-            X_sliced = X[idx*batch_size:(idx+1)*batch_size, :] # size=[batch_size, d] 
-            batch_size_current = X_sliced.size(0) 
-            idx_current += batch_size_current
-            D = X_sliced @ X.transpose(1,0) # size=[batch_size, n] 
-            sorted, indices = torch.sort(D, dim=1, descending=True) # from *largest* to smallest values, size=[batch_size, n]
-            sorted = torch.arccos(sorted).abs() # positive angles
-            values_knn.append(sorted[:,:kNN]) # size=[batch_size, kNN]
-            idx_knn.append(indices[:,:kNN]) # size=[batch_size, kNN]
-            del X_sliced, D, sorted, indices
-            print('batch idx:',idx+1,'/',num_batch,' time(sec):',(time.time()-start)/1) 
-        values_knn = torch.cat(values_knn)
-        idx_knn = torch.cat(idx_knn)
-
-        # Compute Weight matrix
-        D = values_knn.sqrt()
-        sigma2 = (D[:,-1]).mean()**2 # graph-level scale
-        D = (D**2).view(n*kNN)
-        W = torch.exp( -D / sigma2 )
-
-        # Make W sparse
-        row = torch.arange(n).repeat_interleave(kNN).to('cpu')
-        col = idx_knn.view(n*kNN).to('cpu')
-        data = W.to('cpu')
-        W = scipy.sparse.csr_matrix((data, (row, col)), shape=(n, n))
-        
-        # Make W is symmetric
-        bigger = W.T > W
-        W = W - W.multiply(bigger) + W.T.multiply(bigger)
-        W.setdiag(0) # remove self-connections
-
-        print('Computational time(sec) for k-NN graph:',(time.time()-start)/1) 
-
-    
-    ######################################
-    # Construct a k-NN graph with Cosine distance
-    ######################################
-    if dist == 'cosine_binary':
-        
-        print('k-NN graph construction with cosine distance with binary weights')
-        start = time.time()
-
-        # Compute dot products between all pairs of points
-        X = X - X.mean(dim=0).unsqueeze(dim=0) # centered data, size=[n, d] 
-        X = X / (X**2).sum(dim=1).sqrt().unsqueeze(1) # normalized data / project data on unit sphere, size=[n, d] 
-        n = X.size(0)
-        num_batch = n // batch_size
-        if (n//batch_size)*batch_size < n: num_batch += 1
-        print('n, batch_size, num_batch, kNN, device:', n, batch_size, num_batch, kNN, device)
-        values_knn = []
-        idx_knn = []
-        idx_current = 0
-        for idx in range(num_batch):
-            X_sliced = X[idx*batch_size:(idx+1)*batch_size, :] # size=[batch_size, d] 
-            batch_size_current = X_sliced.size(0) 
-            idx_current += batch_size_current
-            D = X_sliced @ X.transpose(1,0) # size=[batch_size, n] 
-            sorted, indices = torch.sort(D, dim=1, descending=True) # from *largest* to smallest values, size=[batch_size, n]
-            sorted = torch.arccos(sorted).abs() # positive angles
-            values_knn.append(sorted[:,:kNN]) # size=[batch_size, kNN]
-            idx_knn.append(indices[:,:kNN]) # size=[batch_size, kNN]
-            del X_sliced, D, sorted, indices
-            print('batch idx:',idx+1,'/',num_batch,' time(sec):',(time.time()-start)/1) 
-        values_knn = torch.cat(values_knn)
-        idx_knn = torch.cat(idx_knn)
-
-        # Compute Weight matrix, W sparse
-        row = torch.arange(n).repeat_interleave(kNN).to('cpu')
-        col = idx_knn.view(n*kNN).to('cpu')
-        data = torch.ones(n*kNN).to('cpu')
-        W = scipy.sparse.csr_matrix((data, (row, col)), shape=(n, n))
-        
-        # Make W is symmetric
-        bigger = W.T > W
-        W = W - W.multiply(bigger) + W.T.multiply(bigger)
-        W.setdiag(0) # remove self-connections
-
-        print('Computational time(sec) for k-NN graph:',(time.time()-start)/1) 
-    
-    return W
 
 
 
