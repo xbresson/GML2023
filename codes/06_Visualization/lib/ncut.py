@@ -41,7 +41,7 @@ import sys
 from numpy import array, reshape, shape, matrix, ones, zeros, sqrt, sort, arange
 from numpy import nonzero, fromfile, tile, append, prod, double, argsort, sign
 from numpy import kron, multiply, divide, abs, reshape, asarray
-from scipy import rand
+from numpy.random import rand
 from scipy.sparse import csc_matrix, spdiags
 #from scipy.sparse.linalg.eigen.arpack import eigsh # XB
 from scipy.sparse.linalg import eigsh # XB
