@@ -31,7 +31,7 @@ Select the notebook 'file.ipynb' and open it with Google Colab using Control Cli
 
 <br><br>
 
-### Local Installation for OSX & Linux
+### Local Installation for OSX M Chips
 
 * Open a Terminal and type
 
@@ -49,8 +49,63 @@ Select the notebook 'file.ipynb' and open it with Google Colab using Control Cli
    cd GML2023
 
    # Install python libraries
-   conda env create -f environment.yml
-   source activate gnn_course
+   conda env create -f environment_osx_arm64.yml
+   conda activate gnn_course
+   pip install --upgrade --force-reinstall scikit-learn==1.3.2 
+
+   # Run the notebooks in Chrome
+   jupyter notebook
+   ```
+
+
+### Local Installation for OSX Intel Chips 
+
+* Open a Terminal and type
+
+
+```sh
+   # Conda installation
+   curl https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -o miniconda.sh -J -L -k # Linux
+   curl https://repo.continuum.io/miniconda/Miniconda3-latest-MacOSX-x86_64.sh -o miniconda.sh -J -L -k # OSX
+   chmod +x miniconda.sh
+   ./miniconda.sh
+   source ~/.bashrc
+
+   # Clone GitHub repo
+   git clone https://github.com/xbresson/GML2023.git
+   cd GML2023
+
+   # Install python libraries
+   conda env create -f environment_osx_intel.yml
+   conda activate gnn_course
+   pip install --upgrade --force-reinstall scikit-learn==1.3.2 
+
+   # Run the notebooks in Chrome
+   jupyter notebook
+   ```
+
+
+### Local Installation for Linux
+
+* Open a Terminal and type
+
+
+```sh
+   # Conda installation
+   curl https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -o miniconda.sh -J -L -k # Linux
+   curl https://repo.continuum.io/miniconda/Miniconda3-latest-MacOSX-x86_64.sh -o miniconda.sh -J -L -k # OSX
+   chmod +x miniconda.sh
+   ./miniconda.sh
+   source ~/.bashrc
+
+   # Clone GitHub repo
+   git clone https://github.com/xbresson/GML2023.git
+   cd GML2023
+
+   # Install python libraries
+   conda env create -f environment_linux.yml
+   conda activate gnn_course
+   pip install --upgrade --force-reinstall scikit-learn==1.3.2 
 
    # Run the notebooks in Chrome
    jupyter notebook
@@ -76,7 +131,7 @@ Select the notebook 'file.ipynb' and open it with Google Colab using Control Cli
    cd GML2023
 
    # Install python libraries
-   conda env create -f environment.yml
+   conda env create -f environment_win64.yml
    conda activate gnn_course
 
    # Run the notebooks in Chrome
